@@ -1,5 +1,6 @@
 ### Changes this version:
 - Added SPI speed selector to MagnTek encoders
+- Added "reg" and "save" commands to MagnTek encoder. Allows programming MT6835 encoders (debug=1 mode required!)
 
 ### Changes in 1.16:
 

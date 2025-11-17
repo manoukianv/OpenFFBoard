@@ -41,6 +41,8 @@ MtEncoderSPI::MtEncoderSPI() : SPIDevice(ENCODER_SPI_PORT,ENCODER_SPI_PORT.getFr
 	registerCommand("errors", MtEncoderSPI_commands::errors, "Parity error count",CMDFLAG_GET);
 	registerCommand("mode", MtEncoderSPI_commands::mode, "Encoder mode (MT6825=0;MT6835=1)",CMDFLAG_GET | CMDFLAG_SET | CMDFLAG_INFOSTRING);
 	registerCommand("speed", MtEncoderSPI_commands::speed, "SPI speed preset",CMDFLAG_GET | CMDFLAG_SET | CMDFLAG_INFOSTRING);
+	registerCommand("reg", MtEncoderSPI_commands::reg, "Read/Write register",CMDFLAG_GETADR | CMDFLAG_SETADR | CMDFLAG_DEBUG);
+	registerCommand("save", MtEncoderSPI_commands::save, "Save to memory",CMDFLAG_GET | CMDFLAG_DEBUG);
 	this->Start();
 }
 
@@ -117,13 +119,13 @@ uint8_t MtEncoderSPI::readSpi(uint16_t addr){
 		uint8_t txbuf[2] = {(uint8_t)(addr | 0x80),0};
 		uint8_t rxbuf[2] = {0,0};
 		spiPort.transmitReceive(txbuf, rxbuf, 2, this,100);
+		return rxbuf[1];
 	}else if(mode == MtEncoderSPI_mode::mt6835){
 		uint8_t txbuf[3] = {(uint8_t)((addr & 0xf00) | 0x30),(uint8_t)(addr & 0xff),0};
 		uint8_t rxbuf[3] = {0,0,0};
 		spiPort.transmitReceive(txbuf, rxbuf, 3, this,100);
+		return rxbuf[2];
 	}
-
-	return rxbuf[1];
 }
 
 void MtEncoderSPI::writeSpi(uint16_t addr,uint8_t data){
@@ -135,6 +137,22 @@ void MtEncoderSPI::writeSpi(uint16_t addr,uint8_t data){
 		spiPort.transmit(txbuf, 3, this,100);
 	}
 
+}
+
+/**
+ * Saves current configuration to permanent storage
+ */
+bool MtEncoderSPI::saveEeprom(){
+	if(mode != MtEncoderSPI_mode::mt6835){
+		return false;
+	}
+	if(mode == MtEncoderSPI_mode::mt6835){
+		uint8_t txbuf[3] = {0xC0,0x00,0x00};
+		uint8_t rxbuf[3] = {0,0,0};
+		spiPort.transmitReceive(txbuf, rxbuf, 3, this,100);
+		return rxbuf[2] == 0x55;
+	}
+	return false;
 }
 
 void MtEncoderSPI::setPos(int32_t pos){
@@ -156,8 +174,6 @@ void MtEncoderSPI::spiTxRxCompleted(SPIPort* port){
  * Reads the angle and diagnostic registers in burst mode
  */
 void MtEncoderSPI::updateAngleStatus(){
-
-
 
 	if(mode == MtEncoderSPI_mode::mt6825){
 		uint8_t txbufNew[5] = {0x03 | 0x80,0,0,0,0};
@@ -323,6 +339,24 @@ CommandStatus MtEncoderSPI::command(const ParsedCommand& cmd,std::vector<Command
 			}
 		}else{
 			return CommandStatus::ERR;
+		}
+		break;
+	}
+	case MtEncoderSPI_commands::reg:
+	{
+		if(cmd.type == CMDtype::getat){
+			replies.emplace_back(readSpi(cmd.adr));
+		}else if(cmd.type == CMDtype::setat){
+			writeSpi(cmd.adr, cmd.val);
+		}else{
+			return CommandStatus::ERR;
+		}
+		break;
+	}
+	case MtEncoderSPI_commands::save:
+	{
+		if(cmd.type == CMDtype::get){
+			replies.emplace_back(saveEeprom() ? 1 : 0);
 		}
 		break;
 	}

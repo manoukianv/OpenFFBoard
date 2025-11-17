@@ -19,7 +19,7 @@
 
 class MtEncoderSPI: public Encoder, public SPIDevice, public PersistentStorage, public CommandHandler,cpp_freertos::Thread{
 	enum class MtEncoderSPI_commands : uint32_t{
-		cspin,pos,errors,mode,speed
+		cspin,pos,errors,mode,speed,reg,save
 	};
 	enum class MtEncoderSPI_mode : uint8_t{
 		mt6825,mt6835
@@ -64,6 +64,7 @@ private:
 	uint8_t readSpi(uint16_t addr);
 	void writeSpi(uint16_t addr,uint8_t data);
 	void spiTxRxCompleted(SPIPort* port);
+	bool saveEeprom();
 
 
 	bool nomag = false; // Magnet lost in last report
