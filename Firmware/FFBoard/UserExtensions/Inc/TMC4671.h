@@ -48,8 +48,8 @@
 
 extern SPI_HandleTypeDef HSPIDRV;
 
-#ifdef TIM_TMC
-extern TIM_HandleTypeDef TIM_TMC;
+#ifdef TIM_ENC
+extern TIM_HandleTypeDef TIM_ENC;
 #endif
 
 #ifdef TIM_CALIBRATION
@@ -72,8 +72,8 @@ extern TIM_HandleTypeDef TIM_CALIBRATION;
 #ifndef TMC4671_ITUNE_CUTOFF
 #define TMC4671_ITUNE_CUTOFF 0.04
 #endif
-#ifndef TIM_TMC_ARR
-#define TIM_TMC_ARR 250
+#ifndef TIM_ENC_ARR
+#define TIM_ENC_ARR 100
 #endif
 
 struct Harmonic {
@@ -796,10 +796,10 @@ private:
 	// Utility: Timer driving the external encoder updater thread. When using an external encoder, 
 	// this timer must continue running unaffected to avoid desynchronizing the encoder.
 	// Pacing of the calibration is then synchronized to this timer via tick counting.
-	// Expected Value: Points to &TIM_TMC (typically htim6, configured with TIM_TMC_ARR) or nullptr.
+	// Expected Value: Points to &TIM_ENC (typically htim6, configured with TIM_ENC_ARR) or nullptr.
 	TIM_HandleTypeDef* externalEncoderTimer = 
-#ifdef TIM_TMC
-		&TIM_TMC;
+#ifdef TIM_ENC
+		&TIM_ENC;
 #else
 		nullptr;
 #endif
@@ -819,12 +819,12 @@ private:
 		nullptr;
 #endif
 
-	// Utility: Active tick counter incremented inside the external encoder timer (TIM_TMC) ISR.
+	// Utility: Active tick counter incremented inside the external encoder timer (TIM_ENC) ISR.
 	// Used only when calibration pacing is driven by the external encoder timer.
 	// Expected Value / Range: Increments from 0 up to (calibTicksTarget - 1).
 	volatile uint32_t calibTicksCount = 0;
 
-	// Utility: The target tick threshold from TIM_TMC that corresponds to the requested calibration period.
+	// Utility: The target tick threshold from TIM_ENC that corresponds to the requested calibration period.
 	// Set to 0 when tick-based pacing is inactive.
 	// Expected Value: Typically 1 for fast calibration loops (e.g., 250 us loop / 250 us ARR)
 	// and 4 for slow calibration loops (e.g., 1000 us loop / 250 us ARR). Value is 0 when inactive.

@@ -1910,7 +1910,7 @@ void TMC4671::setSequentialPI(bool sequential){
 }
 
 void TMC4671::setExternalEncoderAllowed(bool allow){
-#ifndef TIM_TMC
+#ifndef TIM_ENC
 	allowExternalEncoder = false;
 #else
 	bool lastAllowed = allowExternalEncoder;
@@ -1923,7 +1923,7 @@ void TMC4671::setExternalEncoderAllowed(bool allow){
 }
 
 bool TMC4671::externalEncoderAllowed(){
-#ifndef TIM_TMC
+#ifndef TIM_ENC
 	return false;
 #else
 	return allowExternalEncoder && conf.hwconf.flags.enc_ext;
@@ -3117,7 +3117,7 @@ CommandStatus TMC4671::command(const ParsedCommand& cmd,std::vector<CommandReply
 
 }
 
-#if defined(TIM_TMC) || defined(TIM_CALIBRATION)
+#if defined(TIM_ENC) || defined(TIM_CALIBRATION)
 	void TMC4671::timerElapsed(TIM_HandleTypeDef* htim){
 #ifdef TIM_CALIBRATION
 		// If calibration timer triggered the interrupt, notify the waiting calibration loop thread.
@@ -3126,8 +3126,8 @@ CommandStatus TMC4671::command(const ParsedCommand& cmd,std::vector<CommandReply
 			return;
 		}
 #endif
-#ifdef TIM_TMC
-		// Pacing calibration loops when using an external encoder timer (TIM_TMC)
+#ifdef TIM_ENC
+		// Pacing calibration loops when using an external encoder timer (TIM_ENC)
 		if (this->externalEncoderTimer != nullptr && htim == this->externalEncoderTimer) {
 			if (this->calibTicksTarget > 0) {
 				this->calibTicksCount++;
@@ -3142,11 +3142,11 @@ CommandStatus TMC4671::command(const ParsedCommand& cmd,std::vector<CommandReply
 #endif
 
 void TMC4671::setUpExtEncTimer() {
-#ifdef TIM_TMC
+#ifdef TIM_ENC
     if (extEncAdapter == nullptr) {
         extEncAdapter = std::make_unique<ExternalEncoderAdapter>(this, drvEncoder.get());
     }
-    this->externalEncoderTimer = &TIM_TMC;
+    this->externalEncoderTimer = &TIM_ENC;
 #endif
 }
 
@@ -3168,15 +3168,16 @@ void TMC4671::setExternalPhiE(float phiE_rotations) {
  * using the external encoder timer if in use, to avoid desynchronization.
  */
 void TMC4671::startCalibTimers(uint32_t period_us) {
-#ifdef TIM_TMC
-	// If an external encoder is used, we pace the calibration using the existing encoder timer
-	// to avoid stopping, reconfiguring, or desynchronizing it.
+#ifdef TIM_ENC
+	// CASE 1: External Encoder is active.
+	// We MUST NOT start a second timer. We piggyback on TIM_ENC to stay perfectly synchronized.
+	// We calculate how many TIM_ENC ticks correspond to the requested period_us.
 	if (usingExternalEncoder() && this->externalEncoderTimer != nullptr) {
 		uint32_t tmc_period = this->externalEncoderTimer->Instance->ARR;
 		if (tmc_period == 0) {
-			tmc_period = TIM_TMC_ARR;
+			tmc_period = TIM_ENC_ARR;
 		}
-		this->calibTicksTarget = period_us / tmc_period;
+		this->calibTicksTarget = period_us / tmc_period; // e.g. 1000us / 100us = 10 ticks
 		if (this->calibTicksTarget == 0) {
 			this->calibTicksTarget = 1;
 		}
@@ -3184,24 +3185,29 @@ void TMC4671::startCalibTimers(uint32_t period_us) {
 	} else
 #endif
 	{
+		// CASE 2: No external encoder.
+		// We take full control of the dedicated TIM_CALIBRATION hardware timer.
 		this->calibTicksTarget = 0;
 		this->calibTicksCount = 0;
 #ifdef TIM_CALIBRATION
 		if (this->calibTimer != nullptr) {
-			// Stop the timer before changing configurations
 			HAL_TIM_Base_Stop_IT(this->calibTimer);
-			// Configure the prescaler to count in microseconds (1 MHz frequency)
+			
+			// Set Prescaler so the timer ticks exactly every 1 microsecond
 			this->calibTimer->Instance->PSC = (SystemCoreClock / 1000000) - 1;
-			// Auto-reload register defines the period in microseconds
+			
+			// Set Auto-Reload Register to trigger the interrupt every 'period_us' microseconds
 			this->calibTimer->Instance->ARR = period_us;
-			// Pre-charge counter to trigger the first interrupt quickly
-			this->calibTimer->Instance->CNT = period_us - 20;
+			
+			// Reset counter to 0 for a clean start
+			this->calibTimer->Instance->CNT = 0;
+			
 			this->calibTimer->Instance->CR1 = 1;
 			HAL_TIM_Base_Start_IT(this->calibTimer);
 		}
 #endif
 	}
-	// Clear any pending thread notifications before starting wait loops
+	// Clear any pending FreeRTOS thread notifications before starting wait loops
 	this->WaitForNotification(0);
 }
 
@@ -3222,12 +3228,12 @@ void TMC4671::stopCalibTimers() {
  * Returns the actual calibration period in microseconds based on the active timer pacing source.
  */
 uint32_t TMC4671::getActualCalibPeriod(uint32_t target_period_us) {
-#ifdef TIM_TMC
-	// If pacing calibration using TIM_TMC, the actual period is a multiple of TIM_TMC's ARR period.
+#ifdef TIM_ENC
+	// If pacing calibration using TIM_ENC, the actual period is a multiple of TIM_ENC's ARR period.
 	if (usingExternalEncoder() && this->externalEncoderTimer != nullptr) {
 		uint32_t tmc_period = this->externalEncoderTimer->Instance->ARR;
 		if (tmc_period == 0) {
-			tmc_period = TIM_TMC_ARR;
+			tmc_period = TIM_ENC_ARR;
 		}
 		uint32_t ticks = target_period_us / tmc_period;
 		if (ticks == 0) {
@@ -3661,7 +3667,7 @@ void TMC4671::handleStateCoggingCalibration() {
 				/* * 2. Continuous Integral Scale (ki_scale) Calculation
 				 * NOTE: ki_scale is divided by freq_khz because the main loops run at freq_khz instead of 1 kHz.
 				 */
-				float freq_khz = 1000.0f / (float)TIM_TMC_ARR;
+				float freq_khz = 1000.0f / (float)TIM_ENC_ARR;
 				float ki_scale = clip<float>(0.3f / J, 0.0002f, 0.001f) / freq_khz;
 				
 				float wn = 2.0f * PI * f_bw;
@@ -3770,7 +3776,7 @@ void TMC4671::handleStateCoggingCalibration() {
 
 				if (!emergency && hasPower()) {
 					calibStartTime = HAL_GetTick();
-					uint32_t period_us = getActualCalibPeriod(TIM_TMC_ARR); 
+					uint32_t period_us = getActualCalibPeriod(TIM_ENC_ARR); 
 					uint32_t next_tick = micros();
 					float dt_sec = (float)period_us / 1000000.0f;
 					
@@ -3782,7 +3788,7 @@ void TMC4671::handleStateCoggingCalibration() {
 					float iq_cmd = 0.0f;
 					float iq_inertia = 0.0f;
 					
-					startCalibTimers(TIM_TMC_ARR);
+					startCalibTimers(TIM_ENC_ARR);
 					while (HAL_GetTick() - calibStartTime < REVOLUTION_TIME_MS && !emergency && hasPower()) {
 						next_tick += period_us;
 						
@@ -4099,7 +4105,7 @@ void TMC4671::handleStateCoggingCalibration() {
 				// removed initial torque warmup delay to prevent transients
 				
 				float target_pos_f = actual_pos_f;
-				uint32_t period_us = getActualCalibPeriod(TIM_TMC_ARR); 
+				uint32_t period_us = getActualCalibPeriod(TIM_ENC_ARR); 
 				target_rpm = (actual_pos_f > 0.0f) ? -calib_rpm : calib_rpm;
 				
 				// Dynamic timeout based on the distance to cover
@@ -4109,7 +4115,7 @@ void TMC4671::handleStateCoggingCalibration() {
 
 				uint32_t return_start = HAL_GetTick();
 				uint32_t next_tick = micros();
-				startCalibTimers(TIM_TMC_ARR);
+				startCalibTimers(TIM_ENC_ARR);
 				while (fabs(actual_pos_f) > 0.005f && !emergency && hasPower()) {
 					next_tick += period_us;
 					

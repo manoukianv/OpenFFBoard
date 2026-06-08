@@ -59,7 +59,7 @@
 //----------------------
 
 
-#define TIM_ENC htim2
+#define TIM_ENC_ABN_HW htim2
 // Timer 2 is used by the encoder.
 #define TIM_PWM htim1
 
@@ -68,7 +68,8 @@
 // As these two features are mutually exclusive at runtime, sharing htim9 is safe.
 #define TIM_USER htim9
 #define TIM_CALIBRATION htim9
-#define TIM_TMC htim6 // Timer running at half clock speed
+#define TIM_ENC htim6 // Timer running at half clock speed
+#define TIM_ENC_ARR 100 // 10khz
 
 extern UART_HandleTypeDef huart1;
 #define UART_PORT_EXT huart1 // main uart port
