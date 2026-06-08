@@ -1765,7 +1765,7 @@ Encoder* TMC4671::getEncoder(){
 void TMC4671::setEncoder(std::shared_ptr<Encoder>& encoder){
 	MotorDriver::drvEncoder = encoder;
 	if(conf.motconf.enctype == EncoderType_TMC::ext && externalEncoderTimer){
-		if(!extEncUpdater){ // If updater has not been set up because the encoder mode was changed before the external encoder passed force it now
+		if(!extEncAdapter){ // If updater has not been set up because the encoder mode was changed before the external encoder passed force it now
 			setUpExtEncTimer();
 		}
 		changeState(TMC_ControlState::ExternalEncoderInit);
@@ -3127,39 +3127,29 @@ CommandStatus TMC4671::command(const ParsedCommand& cmd,std::vector<CommandReply
 			return;
 		}
 #endif
-#ifdef TIM_TMC
-		if(htim == this->externalEncoderTimer){
-			// Read encoder and send to tmc
-			if(usingExternalEncoder() && externalEncoderAllowed() && this->conf.motconf.phiEsource == PhiE::extEncoder && extEncUpdater != nullptr){
-				//setPhiE_ext(getPhiEfromExternalEncoder());
-				// Signal phiE update
-				extEncUpdater->updateFromIsr(); // Use task so that the update is not being done inside an ISR
-			}
-
-			// If we are using the external encoder timer to pace calibration
-			if (usingExternalEncoder() && this->calibTicksTarget > 0) {
-				this->calibTicksCount = this->calibTicksCount + 1;
-				if (this->calibTicksCount >= this->calibTicksTarget) {
-					this->calibTicksCount = 0;
-					this->NotifyFromISR();
-				}
-			}
-		}
-#endif
 	}
 #endif
 
-void TMC4671::setUpExtEncTimer(){
+void TMC4671::setUpExtEncTimer() {
 #ifdef TIM_TMC
-	if(extEncUpdater == nullptr) // Create updater thread
-		extEncUpdater = std::make_unique<TMC_ExternalEncoderUpdateThread>(this);
-	// Setup timer
-	this->externalEncoderTimer = &TIM_TMC;
-	this->externalEncoderTimer->Instance->ARR = TIM_TMC_ARR; // 200 = 5khz = 5 tmc cycles, 250 = 4khz, 240 = 6 tmc cycles
-	this->externalEncoderTimer->Instance->PSC = ((TIM_TMC_BCLK)/1000000) +1; // 1µs ticks
-	this->externalEncoderTimer->Instance->CR1 = 1;
-	HAL_TIM_Base_Start_IT(this->externalEncoderTimer);
+    if (extEncAdapter == nullptr) {
+        extEncAdapter = std::make_unique<ExternalEncoderAdapter>(this, drvEncoder.get());
+    }
+    this->externalEncoderTimer = &TIM_TMC;
 #endif
+}
+
+void TMC4671::setExternalPhiE(float phiE_rotations) {
+    float phiE_t = phiE_rotations * 65536.0f;
+    if (this->conf.encoderReversed) {
+        phiE_t = -phiE_t;
+    }
+    int32_t phiE = ((int32_t)(phiE_t * (float)conf.motconf.pole_pairs)) & 0xffff;
+    int16_t phiE_final = (int16_t)phiE + externalEncoderPhieOffset;
+    
+    if (!spiPort.isTaken()) {
+        writeRegAsync(0x1C, phiE_final);
+    }
 }
 
 /**
@@ -3238,26 +3228,7 @@ uint32_t TMC4671::getActualCalibPeriod(uint32_t target_period_us) {
 	return target_period_us;
 }
 
-/**
- * Medium priority task to update external encoders
- */
-TMC4671::TMC_ExternalEncoderUpdateThread::TMC_ExternalEncoderUpdateThread(TMC4671* tmc) : cpp_freertos::Thread("TMCENC",80,33),tmc(tmc){
-	this->Start();
-}
 
-void TMC4671::TMC_ExternalEncoderUpdateThread::Run(){
-	while(true){
-		this->WaitForNotification();
-		if(tmc->usingExternalEncoder() && !tmc->spiPort.isTaken()){
-			tmc->writeRegAsync(0x1C, (tmc->getPhiEfromExternalEncoder())); // Write phiE_ext
-		}
-	}
-}
-
-void TMC4671::TMC_ExternalEncoderUpdateThread::updateFromIsr(){
-	if(tmc->initialized)
-		this->NotifyFromISR();
-}
 
 void TMC4671::errorCallback(const Error &error, bool cleared){
 	if(!cleared && error.code == ErrorCode::brakeResistorFailure){
