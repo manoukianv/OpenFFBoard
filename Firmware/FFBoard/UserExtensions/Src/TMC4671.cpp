@@ -3130,7 +3130,7 @@ CommandStatus TMC4671::command(const ParsedCommand& cmd,std::vector<CommandReply
 		// Pacing calibration loops when using an external encoder timer (TIM_ENC)
 		if (this->externalEncoderTimer != nullptr && htim == this->externalEncoderTimer) {
 			if (this->calibTicksTarget > 0) {
-				this->calibTicksCount++;
+				this->calibTicksCount = this->calibTicksCount + 1;
 				if (this->calibTicksCount >= this->calibTicksTarget) {
 					this->calibTicksCount = 0;
 					this->NotifyFromISR();
