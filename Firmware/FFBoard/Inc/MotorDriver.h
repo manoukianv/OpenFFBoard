@@ -53,7 +53,7 @@ public:
 
 
 protected:
-	std::shared_ptr<Encoder> drvEncoder = std::make_shared<Encoder>(); // Dummy encoder
+	std::shared_ptr<Encoder> drvEncoder = std::make_shared<EncoderNone>(); // Dummy encoder
 };
 
 
