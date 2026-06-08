@@ -1755,7 +1755,7 @@ std::pair<uint32_t,std::string> TMC4671::getTmcType(){
 }
 
 Encoder* TMC4671::getEncoder(){
-	if((conf.motconf.enctype == EncoderType_TMC::ext && externalEncoderTimer) || conf.combineEncoder){
+	if((conf.motconf.enctype == EncoderType_TMC::ext || conf.combineEncoder) && MotorDriver::drvEncoder != nullptr){
 		return MotorDriver::drvEncoder.get();
 	}else{
 		return static_cast<Encoder*>(this);
@@ -1806,7 +1806,6 @@ void TMC4671::setTmcPos(int32_t pos){
 int32_t TMC4671::getPos(){
 
 	int32_t pos = (int32_t)readReg(0x6B);
-	this->cached_pos = pos;
 	return pos;
 }
 
@@ -3127,6 +3126,18 @@ CommandStatus TMC4671::command(const ParsedCommand& cmd,std::vector<CommandReply
 			return;
 		}
 #endif
+#ifdef TIM_TMC
+		// Pacing calibration loops when using an external encoder timer (TIM_TMC)
+		if (this->externalEncoderTimer != nullptr && htim == this->externalEncoderTimer) {
+			if (this->calibTicksTarget > 0) {
+				this->calibTicksCount++;
+				if (this->calibTicksCount >= this->calibTicksTarget) {
+					this->calibTicksCount = 0;
+					this->NotifyFromISR();
+				}
+			}
+		}
+#endif
 	}
 #endif
 
@@ -3364,12 +3375,12 @@ float TMC4671::getWrappedError(float target, float actual) {
 }
 
 float TMC4671::getAbsolutePosition() {
-	Encoder* activeEnc = usingExternalEncoder() ? drvEncoder.get() : static_cast<Encoder*>(this);
-	return activeEnc->getPos_f();
+	return getEncoder()->getPos_f();
 }
 
 float TMC4671::getFilteredPosition() {
-	Encoder* activeEnc = usingExternalEncoder() ? drvEncoder.get() : static_cast<Encoder*>(this);
+	Encoder* activeEnc = getEncoder();
+	if (activeEnc == nullptr) return 0.0f;
 	
 	int32_t cpr = activeEnc->getCpr();
 	if (cpr == 0) return 0.0f;
