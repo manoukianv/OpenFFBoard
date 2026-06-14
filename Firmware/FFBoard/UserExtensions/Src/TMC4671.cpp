@@ -1414,6 +1414,12 @@ void TMC4671::setEncoderType(EncoderType_TMC type){
 	setStatusMask(statusMask);
 	encoderAligned = false;
 
+	if (type != EncoderType_TMC::ext) {
+		if (extEncAdapter) {
+			extEncAdapter.reset();
+		}
+	}
+
 	abnconf.rdir = this->conf.encoderReversed;
 	aencconf.rdir = this->conf.encoderReversed;
 
@@ -1765,9 +1771,10 @@ Encoder* TMC4671::getEncoder(){
 void TMC4671::setEncoder(std::shared_ptr<Encoder>& encoder){
 	MotorDriver::drvEncoder = encoder;
 	if(conf.motconf.enctype == EncoderType_TMC::ext && externalEncoderTimer){
-		if(!extEncAdapter){ // If updater has not been set up because the encoder mode was changed before the external encoder passed force it now
-			setUpExtEncTimer();
+		if(extEncAdapter){
+			extEncAdapter.reset(); // Safely destroy the old thread and timer handler
 		}
+		setUpExtEncTimer(); // Recreate it with the new encoder pointer
 		changeState(TMC_ControlState::ExternalEncoderInit);
 	}
 }
@@ -2446,8 +2453,7 @@ void TMC4671::writeReg(uint8_t reg,uint32_t dat){
 	dat =__REV(dat);
 	memcpy(spi_buf+1,&dat,4);
 
-	// -----
-	spiPort.transmit(spi_buf, 5, this, SPITIMEOUT);
+	spiPort.transmitReceive(spi_buf, spi_buf, 5, this, SPITIMEOUT);
 }
 
 void TMC4671::writeRegAsync(uint8_t reg,uint32_t dat){
@@ -2460,9 +2466,9 @@ void TMC4671::writeRegAsync(uint8_t reg,uint32_t dat){
 
 	// -----
 #ifdef TMC4671_ALLOW_DMA
-	spiPort.transmit_DMA(this->spi_buf, 5, this);
+	spiPort.transmitReceive_DMA(this->spi_buf, this->spi_buf, 5, this);
 #else
-	spiPort.transmit_IT(this->spi_buf, 5, this);
+	spiPort.transmitReceive_IT(this->spi_buf, this->spi_buf, 5, this);
 #endif
 }
 
@@ -2479,6 +2485,14 @@ void TMC4671::beginSpiTransfer(SPIPort* port){
 void TMC4671::endSpiTransfer(SPIPort* port){
 	clearChipSelect();
 	port->giveSemaphore();
+}
+
+void TMC4671::spiTxCompleted(SPIPort* port) {
+	// Semaphore is already given by endSpiTransfer
+}
+
+void TMC4671::spiTxRxCompleted(SPIPort* port) {
+	// Semaphore is already given by endSpiTransfer
 }
 
 /**
@@ -3148,7 +3162,7 @@ void TMC4671::setExternalPhiE(float phiE_rotations) {
     int16_t phiE_final = (int16_t)phiE + externalEncoderPhieOffset;
     
     if (!spiPort.isTaken()) {
-        writeRegAsync(0x1C, phiE_final);
+        //VMA writeRegAsync(0x1C, phiE_final);
     }
 }
 
