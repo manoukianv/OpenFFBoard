@@ -15,6 +15,7 @@
 #include <assert.h>
 #include "ErrorHandler.h"
 #include "cpp_target_config.h"
+#include "EncoderManager.h"
 #define MAX_TMC_DRIVERS 3
 
 ClassIdentifier TMC_1::info = {
@@ -1748,6 +1749,8 @@ void TMC4671::setEncoder(std::shared_ptr<Encoder>& enc){
 	// 1. Safely destroy the old consumer thread first to prevent race conditions on drvEncoder
 	if(conf.motconf.enctype == EncoderType_TMC::ext && externalEncoderTimer){
 		if(extEncAdapter){
+			EncoderManager::getInstance().deregisterAdapter(extEncAdapter.get());
+			vTaskDelay(pdMS_TO_TICKS(2)); // RCU Grace Period
 			extEncAdapter.reset(); // Safely destroy the old thread and timer handler
 		}
 	}
