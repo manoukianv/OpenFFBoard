@@ -662,9 +662,7 @@ public:
 
 	void beginSpiTransfer(SPIPort* port);
 	void endSpiTransfer(SPIPort* port);
-	void spiTxCompleted(SPIPort* port);
-	void spiTxRxCompleted(SPIPort* port);
-	//void spiTxCompleted(SPIPort* port);
+
 
 	CommandStatus command(const ParsedCommand& cmd,std::vector<CommandReply>& replies);
 	void registerCommands();
@@ -764,9 +762,7 @@ private:
 	void calibFailCb();
 
 
-// state machine
-//	void ABN_init();
-//	void AENC_init();
+
 
 	void handleStateWaitPower();
 	void handleStateRunning();
