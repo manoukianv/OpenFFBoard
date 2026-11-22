@@ -8,6 +8,7 @@
 
 #include "Axis.h"
 #include "voltagesense.h"
+#include "EncoderManager.h"
 
 // Load the driver is they are declared in targer_constants.h
 #ifdef TMC4671DRIVER
@@ -190,10 +191,6 @@ void Axis::registerCommands(){
 	registerCommand("curspd", Axis_commands::curspd, "Axis speed",CMDFLAG_GET);
 	registerCommand("curaccel", Axis_commands::curaccel, "Axis accel",CMDFLAG_GET);
 	registerCommand("reduction", Axis_commands::reductionScaler, "Encoder to axis gear reduction (val / adr) 1-256",CMDFLAG_GET | CMDFLAG_SETADR);
-	registerCommand("filterProfile_id", Axis_commands::filterProfileId, "Biquad filter profile for speed and accel", CMDFLAG_GET | CMDFLAG_SET);
-	//Can only read exact filter settings
-	registerCommand("filterSpeed", Axis_commands::filterSpeed, "Biquad filter freq and q*100 for speed", CMDFLAG_GET);
-	registerCommand("filterAccel", Axis_commands::filterAccel, "Biquad filter freq and q*100 for accel", CMDFLAG_GET);
 
 	registerCommand("cpr", Axis_commands::cpr, "Reported encoder CPR",CMDFLAG_GET);
 	registerCommand("expo", Axis_commands::expo, "Exponential curve correction (x^(val/exposcale)+1)", CMDFLAG_GET | CMDFLAG_SET);
@@ -288,17 +285,6 @@ void Axis::restoreFlash(){
 		setGearRatio(ratio & 0xff, (ratio >> 8) & 0xff);
 	}
 
-	uint16_t filterStorage;
-	if (Flash_Read(flashAddresses.speedAccelFilter, &filterStorage))
-	{
-		uint8_t profile = filterStorage & 0xFF;
-		this->filterProfileId = profile;
-		speedFilter.setFc(filterSpeedCst[this->filterProfileId].freq / filter_f);
-		speedFilter.setQ(filterSpeedCst[this->filterProfileId].q / 100.0);
-		accelFilter.setFc(filterAccelCst[this->filterProfileId].freq / filter_f);
-		accelFilter.setQ(filterAccelCst[this->filterProfileId].q / 100.0);
-	}
-
 	uint16_t pp1;
 	if(Flash_Read(flashAddresses.postprocess1, &pp1)){
 		setExpo((int8_t)(pp1 & 0xff));
@@ -343,10 +329,6 @@ void Axis::saveFlash(){
 	Flash_Write(flashAddresses.effects1, idleSpringIntensity | (damperIntensity << 8));
 	Flash_Write(flashAddresses.effects2, frictionIntensity | (inertiaIntensity << 8));
 	Flash_Write(flashAddresses.encoderRatio, gearRatio.numerator | (gearRatio.denominator << 8));
-
-	// save CF biquad
-	uint16_t filterStorage = (uint16_t)this->filterProfileId & 0xFF;
-	Flash_Write(flashAddresses.speedAccelFilter, filterStorage);
 
 	// Postprocessing
 	uint16_t pp1 = (expoValue & 0xff) | (equalizerEnabled << 8);
@@ -563,6 +545,9 @@ void Axis::setDrvType(uint8_t drvtype)
  */
 void Axis::setEncType(uint8_t enctype)
 {
+	EncoderManager::getInstance().Suspend();
+	this->enc.reset(); // Destroy old encoder safely before creating the new one
+
 	if (encoderChooser.isValidClassId(enctype) && !drv->hasIntegratedEncoder())
 	{
 
@@ -570,9 +555,14 @@ void Axis::setEncType(uint8_t enctype)
 		this->enc = std::shared_ptr<Encoder>(encoderChooser.Create(enctype)); // Make new encoder
 		if(drv && !drv->hasIntegratedEncoder())
 			this->drv->setEncoder(this->enc);
+
+		if (this->enc) {
+			EncoderManager::getInstance().registerEncoder(this->enc.get());
+		}
 	}else{
 		this->conf.enctype = 0; // None encoder
 	}
+	EncoderManager::getInstance().Resume();
 
 	float angle = getEncAngle(this->getEncoder());
 	//int32_t scaledEnc = scaleEncValue(angle, degreesOfRotation);
@@ -658,14 +648,14 @@ void Axis::usbResume(){
 
 
 metric_t* Axis::getMetrics() {
-	return &metric.current;
+	return &metric;
 }
 
 /**
  * Returns position as int scaled to gamepad range
  */
 int32_t Axis::getLastScaledEnc() {
-	return  clip(metric.current.pos_f * 0x7fffffff,-0x7fffffff,0x7fffffff); // Calc from float pos
+	return  clip(metric.pos_f * 0x7fffffff,-0x7fffffff,0x7fffffff); // Calc from float pos
 }
 
 
@@ -689,13 +679,13 @@ void Axis::setEffectRatio(uint8_t val) {
  * Resets the metrics and filters
  */
 void Axis::resetMetrics(float new_pos= 0) { // pos is degrees
-	metric.current = metric_t();
-	metric.current.posDegrees = new_pos;
-	std::tie(metric.current.pos_scaled_16b,metric.current.pos_f) = scaleEncValue(new_pos, degreesOfRotation);
-	metric.previous = metric_t();
-	// Reset filters
-	speedFilter.calcBiquad();
-	accelFilter.calcBiquad();
+	metric = metric_t();
+	metric.posDegrees = new_pos;
+	std::tie(metric.pos_scaled_16b,metric.pos_f) = scaleEncValue(new_pos, degreesOfRotation);
+	last_torque = 0;
+	// Reset filters - Commented out since speed and acceleration filters are replaced by the Kalman filter in updateMetrics
+	// speedFilter.calcBiquad();
+	// accelFilter.calcBiquad();
 
 #ifdef USE_DSP_FUNCTIONS
 	arm_pid_reset_f32(&speedLimiterPID);	// reset the PID limit
@@ -706,21 +696,26 @@ void Axis::resetMetrics(float new_pos= 0) { // pos is degrees
  * Updates metrics
  */
 void Axis::updateMetrics(float new_pos) { // pos is degrees
-	// store old value for next metric's computing
-	metric.previous = metric.current;
+    metric.posDegrees = new_pos;
+    std::tie(metric.pos_scaled_16b,metric.pos_f) = scaleEncValue(new_pos, degreesOfRotation);
 
-	metric.current.posDegrees = new_pos;
-	std::tie(metric.current.pos_scaled_16b,metric.current.pos_f) = scaleEncValue(new_pos, degreesOfRotation);
-
-
-	// compute speed and accel from raw instant speed normalized
-	float currentSpeed = (new_pos - metric.previous.posDegrees) * this->filter_f; // deg/s
-	metric.current.speed = speedFilter.process(currentSpeed);
-	metric.current.accel = accelFilter.process((currentSpeed - previousFrameSpeed))* this->filter_f; // deg/s/s
-	previousFrameSpeed = currentSpeed;
+    Encoder* encoder = getEncoder();
+    if (encoder != nullptr) {
+        float speed = 360.0f * encoder->getSpeed() * gearRatio.gearRatio;
+        float accel = 360.0f * encoder->getAccel() * gearRatio.gearRatio;
+        if (isInverted()) {
+            speed = -speed;
+            accel = -accel;
+        }
+        metric.speed = speed;
+        metric.accel = accel;
+    } else {
+        metric.speed = 0.0f;
+        metric.accel = 0.0f;
+    }
 
 	// Update hands-off detection buffer
-	accel_buffer[accel_buffer_idx] = metric.current.accel;
+	accel_buffer[accel_buffer_idx] = metric.accel;
 	accel_buffer_idx = (accel_buffer_idx + 1) % (sizeof(accel_buffer) / sizeof(accel_buffer[0]));
 }
 
@@ -763,7 +758,7 @@ int32_t Axis::calculateFFBTorque(){
 	return (int32_t)(torque * 32767.0f * effectRatioScaler);
 }
 
-int32_t Axis::getTorque() { return metric.current.torque; } // Fix: move from previous to current
+int32_t Axis::getTorque() { return metric.torque; } // Fix: move from previous to current
 
 bool Axis::isInverted() {
 	return invertAxis;
@@ -774,11 +769,11 @@ bool Axis::isInverted() {
  */
 int32_t Axis::calculateEndstopTorque(){
 	// TODO Check the type int8_t and the range clipping is -0x7fff..0x7fff
-	int8_t clipDirection = cliptest<int32_t,int32_t>(metric.current.pos_scaled_16b, -0x7fff, 0x7fff);
+	int8_t clipDirection = cliptest<int32_t,int32_t>(metric.pos_scaled_16b, -0x7fff, 0x7fff);
 	if(clipDirection == 0){
 		return 0;
 	}
-	float endstopTorque = clipDirection*metric.current.posDegrees - (float)this->degreesOfRotation/2.0; // degress of rotation counts total range so multiply by 2
+	float endstopTorque = clipDirection*metric.posDegrees - (float)this->degreesOfRotation/2.0; // degress of rotation counts total range so multiply by 2
 	endstopTorque *= (float)endstopStrength * endstopGain; // Apply endstop gain for stiffness.
 	endstopTorque *= -clipDirection;
 
@@ -822,7 +817,7 @@ bool Axis::updateTorque(int32_t* totalTorque) {
 	// Increases forceFadeMultiplier progressively based on forceFadeDuration and sample rate.
 	if(forceFadeMultiplier < 1.0f){
 		torque = (int32_t)((float)torque * forceFadeMultiplier);
-		forceFadeMultiplier += forceFadeDuration / this->filter_f;
+		forceFadeMultiplier += forceFadeDuration / 1000.0f;
 	}
 
 	// STEP 6: Dynamic limiters (Speed)
@@ -830,7 +825,7 @@ bool Axis::updateTorque(int32_t* totalTorque) {
 	torque -= applySpeedLimiterTorque(torque);
 
 	// STEP 7: Axis inversion and Slew Rate Limiter
-	// Axis inversion must be done BEFORE Slew Rate because previous.torque is in hardware CS.
+	// Axis inversion must be done BEFORE Slew Rate because last_torque is in hardware CS.
 	torque = (invertAxis) ? -torque : torque;
 
 	// CRITICAL: Slew Rate compares the target value with "metric.previous.torque"
@@ -846,12 +841,14 @@ bool Axis::updateTorque(int32_t* totalTorque) {
 	}
 
 	// Store the actually applied torque for the next iteration (used by the slew rate limiter).
-	metric.current.torque = torqueAfterClipping; 
+	bool changed = (torqueAfterClipping != last_torque);
+	last_torque = torqueAfterClipping;
+	metric.torque = torqueAfterClipping;
 	
 	// return result
 	*totalTorque = torqueAfterClipping;
 	
-	return (metric.current.torque != metric.previous.torque);
+	return changed;
 }
 
 
@@ -864,7 +861,7 @@ void Axis::applyTorqueSlewRateLimiter(int32_t& torque)
 	}
 
 	// This prevents sudden torque jumps, resulting in a smoother feel.
-	const int32_t previousTorque = metric.previous.torque;
+	const int32_t previousTorque = last_torque;
 	const int32_t maxTorqueChange = maxTorqueRateMS;
 
 	// The torque is clipped to be within the range of [previous torque - limit, previous torque + limit].
@@ -881,8 +878,7 @@ int32_t Axis::applySpeedLimiterTorque(int32_t& torque){
 	}
 
 	int32_t resultTorque = 0;
-
-	float effectiveSpeed = metric.current.speed * (torque > 0 ? 1.0f : -1.0f);
+	float effectiveSpeed = metric.speed * (torque > 0 ? 1.0f : -1.0f);
 
 	if (effectiveSpeed > maxSpeedDegS)
 	{
@@ -924,21 +920,10 @@ int32_t Axis::applySpeedLimiterTorque(int32_t& torque){
  */
 void Axis::updateSamplerate(float newSamplerate){
 	this->filter_f = newSamplerate;
-	this->updateFilters(this->filterProfileId); // Recalculate filters
 	// Update EQ samplerate
 	for(uint8_t idx = 0; idx < eqFilters.size(); idx++){
 		eqFilters[idx].setFc(eq_frequencies[idx] / filter_f);
 	}
-}
-
-void Axis::updateFilters(uint8_t profileId){
-	this->filterProfileId = profileId;
-	speedFilter.setFc(filterSpeedCst[this->filterProfileId].freq / filter_f);
-	speedFilter.setQ(filterSpeedCst[this->filterProfileId].q / 100.0);
-	accelFilter.setFc(filterAccelCst[this->filterProfileId].freq / filter_f);
-	accelFilter.setQ(filterAccelCst[this->filterProfileId].q / 100.0);
-
-
 }
 
 /**
@@ -1021,7 +1006,7 @@ CommandStatus Axis::command(const ParsedCommand& cmd,std::vector<CommandReply>& 
 		else if (cmd.type == CMDtype::set)
 		{
 			invertAxis = cmd.val >= 1 ? true : false;
-			resetMetrics(-metric.current.posDegrees);
+			resetMetrics(-metric.posDegrees);
 		}
 		break;
 
@@ -1153,16 +1138,16 @@ CommandStatus Axis::command(const ParsedCommand& cmd,std::vector<CommandReply>& 
 		break;
 
 	case Axis_commands::curpos:
-		replies.emplace_back(this->metric.previous.pos_scaled_16b);
+		replies.emplace_back(this->metric.pos_scaled_16b);
 		break;
 	case Axis_commands::curtorque:
 		replies.emplace_back(getTorque());
 		break;
 	case Axis_commands::curspd:
-		replies.emplace_back(this->metric.previous.speed);
+		replies.emplace_back(this->metric.speed);
 		break;
 	case Axis_commands::curaccel:
-		replies.emplace_back(this->metric.previous.accel);
+		replies.emplace_back(this->metric.accel);
 		break;
 
 	case Axis_commands::reductionScaler:
@@ -1170,31 +1155,6 @@ CommandStatus Axis::command(const ParsedCommand& cmd,std::vector<CommandReply>& 
 			replies.emplace_back(gearRatio.numerator+1,gearRatio.denominator+1);
 		}else if(cmd.type == CMDtype::setat){
 			setGearRatio(cmd.val-1,cmd.adr-1);
-		}
-		break;
-
-	case Axis_commands::filterProfileId:
-		if (cmd.type == CMDtype::get)
-		{
-			replies.emplace_back(this->filterProfileId);
-		}
-		else if (cmd.type == CMDtype::set)
-		{
-			uint32_t value = clip<uint32_t, uint32_t>(cmd.val, 0, filterSpeedCst.size()-1);
-			this->updateFilters(value);
-		}
-		break;
-	case Axis_commands::filterSpeed:
-		if (cmd.type == CMDtype::get)
-		{
-			replies.emplace_back(this->filterSpeedCst[this->filterProfileId].freq,this->filterSpeedCst[this->filterProfileId].q);
-		}
-		break;
-
-	case Axis_commands::filterAccel:
-		if (cmd.type == CMDtype::get)
-		{
-			replies.emplace_back(this->filterAccelCst[this->filterProfileId].freq,this->filterAccelCst[this->filterProfileId].q);
 		}
 		break;
 
@@ -1293,7 +1253,7 @@ void Axis::updateHandsOffState() {
 
 
     // Safety override: if speed is very high, cut torque
-    if (abs(metric.current.speed) > handsOffSpeedThreshold) {
+    if (abs(metric.speed) > handsOffSpeedThreshold) {
         handsOff = true;
         return;
     }

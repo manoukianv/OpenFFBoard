@@ -103,13 +103,6 @@ struct metric_t {
 };
 
 
-/**
- * @brief Holds the current and previous metrics for an axis, used for calculating derivatives.
- */
-struct axis_metric_t {
-	metric_t current;  //!< Current metrics.
-	metric_t previous; //!< Metrics from the previous update cycle.
-};
 
 /**
  * @brief Represents a gear ratio for scaling encoder values.
@@ -124,7 +117,7 @@ enum class Axis_commands : uint32_t{
 	power=0x00,degrees=0x01,esgain,zeroenc,invert,idlespring,axisdamper,enctype,drvtype,
 	pos,curtorque,curpos,curspd,curaccel,
 	fxratio,reductionScaler,
-	filterSpeed, filterAccel, filterProfileId,cpr,axisfriction,axisinertia,
+	cpr,axisfriction,axisinertia,
 	maxspeed,slewrate,
 	calibrate_maxSlewRateDrv,
 	maxSlewRateDrv,
@@ -361,9 +354,11 @@ public:
 	 */
 	bool updateTorque(int32_t* totalTorque);
 
-
+	/**
+	 * @brief Updates the sample rate for axis filters.
+	 * @param newSamplerate The new sample rate in Hz.
+	 */
 	void updateSamplerate(float newSamplerate);
-	void updateFilters(uint8_t profileId);
 
 	/**
 	 * @brief Sets the gear ratio.
@@ -479,7 +474,8 @@ private:
 #endif
 
 	// Axis metrics
-	axis_metric_t metric;			//!< Current and previous physical metrics of the axis.
+	metric_t metric;			//!< Current physical metrics of the axis.
+	int32_t last_torque = 0;
 	float previousFrameSpeed = 0;			//!< Instantaneous speed from the last cycle, used for acceleration calculation.
 
 	// Torque components
@@ -504,22 +500,13 @@ private:
 	bool awaitingSlewCalibration = false;
 
 	// Filters
-	// TODO tune these and check if it is really stable and beneficial to the FFB. index 4 placeholder
-	const std::array<biquad_constant_t,4> filterSpeedCst = { {{ 40, 55 }, { 70, 55 }, { 120, 55 }, {180, 55}} }; //!< Speed filter profiles.
-	const std::array<biquad_constant_t,4> filterAccelCst = { {{ 40, 30 }, { 55, 30 }, { 70, 30 }, {120, 55}} }; //!< Acceleration filter profiles.
-
-	uint8_t filterProfileId = 1; //!< Currently selected filter profile ID.
 	float filter_f = 1000.0; // 1khz
 	const int32_t internalFxClip = 20000; //!< Clipping value for internal effects.
-
 	// Internal effects intensity
 	uint8_t idleSpringIntensity = 127; //!< Intensity of the idle spring.
 	uint8_t damperIntensity = 30;	//!< Intensity of the internal damper effect.
 	uint8_t frictionIntensity = 0;	//!< Intensity of the internal friction effect.
 	uint8_t inertiaIntensity = 0;	//!< Intensity of the internal inertia effect.
-
-	Biquad speedFilter = Biquad(BiquadType::lowpass, filterSpeedCst[filterProfileId].freq/filter_f, filterSpeedCst[filterProfileId].q/100.0, 0.0);
-	Biquad accelFilter = Biquad(BiquadType::lowpass, filterAccelCst[filterProfileId].freq/filter_f, filterAccelCst[filterProfileId].q/100.0, 0.0);
 
 
 	// Equalizer

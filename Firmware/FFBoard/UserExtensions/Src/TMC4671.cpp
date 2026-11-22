@@ -15,6 +15,7 @@
 #include <assert.h>
 #include "ErrorHandler.h"
 #include "cpp_target_config.h"
+#include "EncoderManager.h"
 #define MAX_TMC_DRIVERS 3
 
 ClassIdentifier TMC_1::info = {
@@ -82,6 +83,10 @@ TMC4671::TMC4671(SPIPort& spiport,OutputPin cspin,uint8_t address) :
 
 
 TMC4671::~TMC4671() {
+	if (extEncAdapter) {
+		extEncAdapter.reset();
+	}
+
 	enablePin.reset();
 	//recordSpiAddrUsed(0);
 }
@@ -133,11 +138,6 @@ void TMC4671::saveFlash(){
 	Flash_Write(flashAddrs.flux_p, curPids.fluxP);
 	Flash_Write(flashAddrs.flux_i, curPids.fluxI);
 	Flash_Write(flashAddrs.encOffset,(uint16_t)abnconf.posOffsetFromIndex);
-
-	// If encoder is ABN and uses index save the last configured offset
-//	if(this->conf.motconf.enctype == EncoderType_TMC::abn && this->abnconf.useIndex && encoderAligned){
-//		Flash_Write(flashAddrs.phieOffset, abnconf.phiEoffset);
-//	}
 
 	uint16_t filterval = (torqueFilterConf.params.freq & 0x1fff) | ((uint8_t)(torqueFilterConf.mode) << 13);
 	Flash_Write(flashAddrs.torqueFilter, filterval);
@@ -205,11 +205,6 @@ void TMC4671::restoreFlash(){
 	}else{
 		recalibrationRequired = true; // Never stored
 	}
-
-//	abnconf.phiEoffset = Flash_ReadDefault(flashAddrs.phieOffset,0);
-//	if(abnconf.phiEoffset != 0){
-//		phiErestored = true;
-//	}
 
 	uint16_t miscval;
 	if(Flash_Read(flashAddrs.encA, &miscval)){
@@ -310,10 +305,6 @@ void TMC4671::setupDriver() {
  * restoreFlash() should be called before this to restore settings!
  */
 bool TMC4671::initialize(){
-//	active = true;
-//	if(state == TMC_ControlState::uninitialized){
-//		state = TMC_ControlState::Init_wait;
-//	}
 	// Check if a TMC4671 is active and replies correctly
 	if(!pingDriver()){
 		ErrorHandler::addError(COMMUNICATION_ERROR);
@@ -394,12 +385,6 @@ bool TMC4671::initialize(){
 
 	setPids(curPids); // Write basic pids
 
-//	if(hasPower()){
-//		enablePin.set();
-//		setPwm(TMC_PwmMode::PWM_FOC);
-//		calibrateAdcOffset(400); // Calibrate ADC again with power
-//		motorEnabledRequested = true;
-//	}
 	//setEncoderType(conf.motconf.enctype);
 
 	// Update flags
@@ -745,12 +730,6 @@ bool TMC4671::findEncoderIndex(int32_t speed, uint16_t power,bool offsetPhiM,boo
 	curFilters.flux.params.enable = false;
 	setBiquadFlux(curFilters.flux);
 	setFluxTorque(0, 0);
-//	setPhiE_ext(getPhiE());
-//	setPhiEtype(PhiE::openloop);
-
-//	abnconf.clear_on_N = true;
-//	setup_ABN_Enc(abnconf);
-
 	// Arm encoder signal
 	setEncoderIndexFlagEnabled(true,zeroCount);
 	// Rotate
@@ -775,8 +754,6 @@ bool TMC4671::findEncoderIndex(int32_t speed, uint16_t power,bool offsetPhiM,boo
 		zeroAbnUsingPhiM(false);
 	}
 
-//	abnconf.clear_on_N = false;
-//	setup_ABN_Enc(abnconf);
 	curFilters.flux.params.enable = true;
 	setBiquadFlux(curFilters.flux);
 
@@ -1439,6 +1416,12 @@ void TMC4671::setEncoderType(EncoderType_TMC type){
 	setStatusMask(statusMask);
 	encoderAligned = false;
 
+	if (type != EncoderType_TMC::ext) {
+		if (extEncAdapter) {
+			extEncAdapter.reset();
+		}
+	}
+
 	abnconf.rdir = this->conf.encoderReversed;
 	aencconf.rdir = this->conf.encoderReversed;
 
@@ -1780,19 +1763,29 @@ std::pair<uint32_t,std::string> TMC4671::getTmcType(){
 }
 
 Encoder* TMC4671::getEncoder(){
-	if((conf.motconf.enctype == EncoderType_TMC::ext && externalEncoderTimer) || conf.combineEncoder){
+	if((conf.motconf.enctype == EncoderType_TMC::ext || conf.combineEncoder) && MotorDriver::drvEncoder != nullptr && externalEncoderTimer != nullptr){
 		return MotorDriver::drvEncoder.get();
 	}else{
 		return static_cast<Encoder*>(this);
 	}
 }
 
-void TMC4671::setEncoder(std::shared_ptr<Encoder>& encoder){
-	MotorDriver::drvEncoder = encoder;
+void TMC4671::setEncoder(std::shared_ptr<Encoder>& enc){
+	// 1. Safely destroy the old consumer thread first to prevent race conditions on drvEncoder
 	if(conf.motconf.enctype == EncoderType_TMC::ext && externalEncoderTimer){
-		if(!extEncUpdater){ // If updater has not been set up because the encoder mode was changed before the external encoder passed force it now
-			setUpExtEncTimer();
+		if(extEncAdapter){
+			EncoderManager::getInstance().deregisterAdapter(extEncAdapter.get());
+			vTaskDelay(pdMS_TO_TICKS(2)); // RCU Grace Period
+			extEncAdapter.reset(); // Safely destroy the old thread and timer handler
 		}
+	}
+
+	// 2. Reassign the pointer safely
+	MotorDriver::drvEncoder = enc;
+	
+	// 3. Recreate the adapter with the new encoder pointer if necessary
+	if(conf.motconf.enctype == EncoderType_TMC::ext && externalEncoderTimer){
+		setUpExtEncTimer(); 
 		changeState(TMC_ControlState::ExternalEncoderInit);
 	}
 }
@@ -1936,7 +1929,7 @@ void TMC4671::setSequentialPI(bool sequential){
 }
 
 void TMC4671::setExternalEncoderAllowed(bool allow){
-#ifndef TIM_TMC
+#ifndef TIM_ENC
 	allowExternalEncoder = false;
 #else
 	bool lastAllowed = allowExternalEncoder;
@@ -1949,7 +1942,7 @@ void TMC4671::setExternalEncoderAllowed(bool allow){
 }
 
 bool TMC4671::externalEncoderAllowed(){
-#ifndef TIM_TMC
+#ifndef TIM_ENC
 	return false;
 #else
 	return allowExternalEncoder && conf.hwconf.flags.enc_ext;
@@ -2471,8 +2464,7 @@ void TMC4671::writeReg(uint8_t reg,uint32_t dat){
 	dat =__REV(dat);
 	memcpy(spi_buf+1,&dat,4);
 
-	// -----
-	spiPort.transmit(spi_buf, 5, this, SPITIMEOUT);
+	spiPort.transmitReceive(spi_buf, spi_buf, 5, this, SPITIMEOUT);
 }
 
 void TMC4671::writeRegAsync(uint8_t reg,uint32_t dat){
@@ -2485,9 +2477,9 @@ void TMC4671::writeRegAsync(uint8_t reg,uint32_t dat){
 
 	// -----
 #ifdef TMC4671_ALLOW_DMA
-	spiPort.transmit_DMA(this->spi_buf, 5, this);
+	spiPort.transmitReceive_DMA(this->spi_buf, this->spi_buf, 5, this);
 #else
-	spiPort.transmit_IT(this->spi_buf, 5, this);
+	spiPort.transmitReceive_IT(this->spi_buf, this->spi_buf, 5, this);
 #endif
 }
 
@@ -2505,6 +2497,7 @@ void TMC4671::endSpiTransfer(SPIPort* port){
 	clearChipSelect();
 	port->giveSemaphore();
 }
+
 
 /**
  * Reads status flags
@@ -3143,7 +3136,7 @@ CommandStatus TMC4671::command(const ParsedCommand& cmd,std::vector<CommandReply
 
 }
 
-#if defined(TIM_TMC) || defined(TIM_CALIBRATION)
+#if defined(TIM_ENC) || defined(TIM_CALIBRATION)
 	void TMC4671::timerElapsed(TIM_HandleTypeDef* htim){
 #ifdef TIM_CALIBRATION
 		// If calibration timer triggered the interrupt, notify the waiting calibration loop thread.
@@ -3152,15 +3145,8 @@ CommandStatus TMC4671::command(const ParsedCommand& cmd,std::vector<CommandReply
 			return;
 		}
 #endif
-#ifdef TIM_TMC
+#ifdef TIM_ENC
 		if(htim == this->externalEncoderTimer){
-			// Read encoder and send to tmc
-			if(usingExternalEncoder() && externalEncoderAllowed() && this->conf.motconf.phiEsource == PhiE::extEncoder && extEncUpdater != nullptr){
-				//setPhiE_ext(getPhiEfromExternalEncoder());
-				// Signal phiE update
-				extEncUpdater->updateFromIsr(); // Use task so that the update is not being done inside an ISR
-			}
-
 			// If we are using the external encoder timer to pace calibration
 			if (usingExternalEncoder() && this->calibTicksTarget > 0) {
 				this->calibTicksCount = this->calibTicksCount + 1;
@@ -3174,16 +3160,12 @@ CommandStatus TMC4671::command(const ParsedCommand& cmd,std::vector<CommandReply
 	}
 #endif
 
-void TMC4671::setUpExtEncTimer(){
-#ifdef TIM_TMC
-	if(extEncUpdater == nullptr) // Create updater thread
-		extEncUpdater = std::make_unique<TMC_ExternalEncoderUpdateThread>(this);
-	// Setup timer
-	this->externalEncoderTimer = &TIM_TMC;
-	this->externalEncoderTimer->Instance->ARR = TIM_TMC_ARR; // 200 = 5khz = 5 tmc cycles, 250 = 4khz, 240 = 6 tmc cycles
-	this->externalEncoderTimer->Instance->PSC = ((TIM_TMC_BCLK)/1000000) +1; // 1µs ticks
-	this->externalEncoderTimer->Instance->CR1 = 1;
-	HAL_TIM_Base_Start_IT(this->externalEncoderTimer);
+void TMC4671::setUpExtEncTimer() {
+#ifdef TIM_ENC
+    if (extEncAdapter == nullptr) {
+        extEncAdapter = std::make_unique<ExternalEncoderAdapter>(this, drvEncoder.get());
+    }
+    this->externalEncoderTimer = &TIM_ENC;
 #endif
 }
 
@@ -3192,13 +3174,13 @@ void TMC4671::setUpExtEncTimer(){
  * using the external encoder timer if in use, to avoid desynchronization.
  */
 void TMC4671::startCalibTimers(uint32_t period_us) {
-#ifdef TIM_TMC
+#ifdef TIM_ENC
 	// If an external encoder is used, we pace the calibration using the existing encoder timer
 	// to avoid stopping, reconfiguring, or desynchronizing it.
 	if (usingExternalEncoder() && this->externalEncoderTimer != nullptr) {
 		uint32_t tmc_period = this->externalEncoderTimer->Instance->ARR;
 		if (tmc_period == 0) {
-			tmc_period = TIM_TMC_ARR;
+			tmc_period = TIM_ENC_ARR;
 		}
 		this->calibTicksTarget = period_us / tmc_period;
 		if (this->calibTicksTarget == 0) {
@@ -3246,12 +3228,12 @@ void TMC4671::stopCalibTimers() {
  * Returns the actual calibration period in microseconds based on the active timer pacing source.
  */
 uint32_t TMC4671::getActualCalibPeriod(uint32_t target_period_us) {
-#ifdef TIM_TMC
-	// If pacing calibration using TIM_TMC, the actual period is a multiple of TIM_TMC's ARR period.
+#ifdef TIM_ENC
+	// If pacing calibration using TIM_ENC, the actual period is a multiple of TIM_ENC's ARR period.
 	if (usingExternalEncoder() && this->externalEncoderTimer != nullptr) {
 		uint32_t tmc_period = this->externalEncoderTimer->Instance->ARR;
 		if (tmc_period == 0) {
-			tmc_period = TIM_TMC_ARR;
+			tmc_period = TIM_ENC_ARR;
 		}
 		uint32_t ticks = target_period_us / tmc_period;
 		if (ticks == 0) {
@@ -3263,26 +3245,34 @@ uint32_t TMC4671::getActualCalibPeriod(uint32_t target_period_us) {
 	return target_period_us;
 }
 
-/**
- * Medium priority task to update external encoders
- */
-TMC4671::TMC_ExternalEncoderUpdateThread::TMC_ExternalEncoderUpdateThread(TMC4671* tmc) : cpp_freertos::Thread("TMCENC",80,33),tmc(tmc){
-	this->Start();
+void TMC4671::setExternalPhiE(float phiE_rotations) {
+    // 1. Is the external encoder physically present and configured?
+    if (!usingExternalEncoder()) return;
+
+    // 2. Is the hardware officially allowing the external encoder?
+    if (!externalEncoderAllowed()) return;
+
+    // 3. Is the TMC currently using the external encoder for its phase?
+    if (this->conf.motconf.phiEsource != PhiE::extEncoder) return;
+
+    // 4. Do not disturb calibration and initialization steps
+    if (isCalibrationInProgress()) {
+        return;
+    }
+
+    float phiE_t = phiE_rotations * 65536.0f;
+    if (this->conf.encoderReversed) {
+        phiE_t = -phiE_t;
+    }
+    int32_t phiE = ((int32_t)(phiE_t * (float)conf.motconf.pole_pairs)) & 0xffff;
+    int16_t phiE_final = (int16_t)phiE + externalEncoderPhieOffset;
+    
+    if (!spiPort.isTaken()) {
+        //VMA writeRegAsync(0x1C, phiE_final);
+    }
 }
 
-void TMC4671::TMC_ExternalEncoderUpdateThread::Run(){
-	while(true){
-		this->WaitForNotification();
-		if(tmc->usingExternalEncoder() && !tmc->spiPort.isTaken()){
-			tmc->writeRegAsync(0x1C, (tmc->getPhiEfromExternalEncoder())); // Write phiE_ext
-		}
-	}
-}
 
-void TMC4671::TMC_ExternalEncoderUpdateThread::updateFromIsr(){
-	if(tmc->initialized)
-		this->NotifyFromISR();
-}
 
 void TMC4671::errorCallback(const Error &error, bool cleared){
 	if(!cleared && error.code == ErrorCode::brakeResistorFailure){
@@ -3757,7 +3747,7 @@ void TMC4671::handleStateCoggingCalibration() {
 				/* * 2. Continuous Integral Scale (ki_scale) Calculation
 				 * NOTE: ki_scale is divided by freq_khz because the main loops run at freq_khz instead of 1 kHz.
 				 */
-				float freq_khz = 1000.0f / (float)TIM_TMC_ARR;
+				float freq_khz = 1000.0f / (float)TIM_ENC_ARR;
 				float ki_scale = clip<float>(0.3f / J, 0.0002f, 0.001f) / freq_khz;
 				
 				float wn = 2.0f * PI * f_bw;
@@ -3866,7 +3856,7 @@ void TMC4671::handleStateCoggingCalibration() {
 
 				if (!emergency && hasPower()) {
 					calibStartTime = HAL_GetTick();
-					uint32_t period_us = getActualCalibPeriod(TIM_TMC_ARR); 
+					uint32_t period_us = getActualCalibPeriod(TIM_ENC_ARR); 
 					uint32_t next_tick = micros();
 					float dt_sec = (float)period_us / 1000000.0f;
 					
@@ -3878,7 +3868,7 @@ void TMC4671::handleStateCoggingCalibration() {
 					float iq_cmd = 0.0f;
 					float iq_inertia = 0.0f;
 					
-					startCalibTimers(TIM_TMC_ARR);
+					startCalibTimers(TIM_ENC_ARR);
 					while (HAL_GetTick() - calibStartTime < REVOLUTION_TIME_MS && !emergency && hasPower()) {
 						next_tick += period_us;
 						
@@ -4195,7 +4185,7 @@ void TMC4671::handleStateCoggingCalibration() {
 				// removed initial torque warmup delay to prevent transients
 				
 				float target_pos_f = actual_pos_f;
-				uint32_t period_us = getActualCalibPeriod(TIM_TMC_ARR); 
+				uint32_t period_us = getActualCalibPeriod(TIM_ENC_ARR); 
 				target_rpm = (actual_pos_f > 0.0f) ? -calib_rpm : calib_rpm;
 				
 				// Dynamic timeout based on the distance to cover
@@ -4205,7 +4195,7 @@ void TMC4671::handleStateCoggingCalibration() {
 
 				uint32_t return_start = HAL_GetTick();
 				uint32_t next_tick = micros();
-				startCalibTimers(TIM_TMC_ARR);
+				startCalibTimers(TIM_ENC_ARR);
 				while (fabs(actual_pos_f) > 0.005f && !emergency && hasPower()) {
 					next_tick += period_us;
 					

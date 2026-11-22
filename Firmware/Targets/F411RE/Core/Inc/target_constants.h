@@ -50,14 +50,15 @@
 #define DEBUGPIN // GP1 pin. see cpp target constants
 #define UARTCOMMANDS
 
-#define TIM_ENC htim3
+#define TIM_ENC_ABN_HW htim3
 // Timer 3 is used by the encoder.
 // htim9 is shared: used as TIM_USER (e.g. MidiMain) and TIM_CALIBRATION (TMC4671).
 // As these two features are mutually exclusive at runtime, sharing htim9 is safe.
 #define TIM_USER htim9
 #define TIM_CALIBRATION htim9
-#define TIM_TMC htim2
-#define TIM_TMC_BCLK SystemCoreClock
+#define TIM_ENC htim2
+#define TIM_ENC_BCLK SystemCoreClock
+#define TIM_ENC_ARR 100 // 10khz
 
 extern I2C_HandleTypeDef hi2c3;
 #define I2C_PORT hi2c3

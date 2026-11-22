@@ -21,6 +21,7 @@
 #include "ExtiHandler.h"
 #include "SPI.h"
 #include "TimerHandler.h"
+#include "ExternalEncoderAdapter.h"
 #include <span>
 #include "semaphore.hpp"
 
@@ -47,8 +48,8 @@
 
 extern SPI_HandleTypeDef HSPIDRV;
 
-#ifdef TIM_TMC
-extern TIM_HandleTypeDef TIM_TMC;
+#ifdef TIM_ENC
+extern TIM_HandleTypeDef TIM_ENC;
 #endif
 
 #ifdef TIM_CALIBRATION
@@ -71,8 +72,8 @@ extern TIM_HandleTypeDef TIM_CALIBRATION;
 #ifndef TMC4671_ITUNE_CUTOFF
 #define TMC4671_ITUNE_CUTOFF 0.04
 #endif
-#ifndef TIM_TMC_ARR
-#define TIM_TMC_ARR 250
+#ifndef TIM_ENC_ARR
+#define TIM_ENC_ARR 100
 #endif
 
 struct Harmonic {
@@ -526,7 +527,7 @@ public:
 	bool isSlewRateCalibrationInProgress();
 	bool isCalibrationInProgress() override;
 
-#if defined(TIM_TMC) || defined(TIM_CALIBRATION)
+#if defined(TIM_ENC) || defined(TIM_CALIBRATION)
 	// Callback triggered when a hardware timer expires
 	void timerElapsed(TIM_HandleTypeDef* htim);
 #endif
@@ -537,6 +538,7 @@ public:
 	void startMotor();
 
 	void setPowerLimit(uint16_t power) override;
+	void setExternalPhiE(float phiE) override;
 
 	void emergencyStop(bool reset);
 	bool emergency = false;
@@ -663,7 +665,7 @@ public:
 
 	void beginSpiTransfer(SPIPort* port);
 	void endSpiTransfer(SPIPort* port);
-	//void spiTxCompleted(SPIPort* port);
+
 
 	CommandStatus command(const ParsedCommand& cmd,std::vector<CommandReply>& replies);
 	void registerCommands();
@@ -671,16 +673,6 @@ public:
 	virtual std::string getHelpstring(){return "TMC4671 interface";}
 
 protected:
-	class TMC_ExternalEncoderUpdateThread : public cpp_freertos::Thread{
-	public:
-	TMC_ExternalEncoderUpdateThread(TMC4671* tmc);
-		//~TMC_ExternalEncoderUpdateThread();
-		void Run();
-		void updateFromIsr();
-
-	private:
-		TMC4671* tmc;
-	};
 
 	static std::span<const TMC4671HardwareTypeConf> tmc4671_hw_configs; // Can override in external target file
 
@@ -776,9 +768,7 @@ private:
 	void calibFailCb();
 
 
-// state machine
-//	void ABN_init();
-//	void AENC_init();
+
 
 	void handleStateWaitPower();
 	void handleStateRunning();
@@ -810,10 +800,10 @@ private:
 	// Utility: Timer driving the external encoder updater thread. When using an external encoder, 
 	// this timer must continue running unaffected to avoid desynchronizing the encoder.
 	// Pacing of the calibration is then synchronized to this timer via tick counting.
-	// Expected Value: Points to &TIM_TMC (typically htim6, configured with TIM_TMC_ARR) or nullptr.
+	// Expected Value: Points to &TIM_ENC (typically htim6, configured with TIM_ENC_ARR) or nullptr.
 	TIM_HandleTypeDef* externalEncoderTimer = 
-#ifdef TIM_TMC
-		&TIM_TMC;
+#ifdef TIM_ENC
+		&TIM_ENC;
 #else
 		nullptr;
 #endif
@@ -821,7 +811,7 @@ private:
 	// Utility: Dedicated FreeRTOS helper thread to write external encoder positions to the TMC4671 
 	// register 0x1C asynchronously over SPI, keeping long SPI transfers out of the ISR.
 	// Expected Value: Valid std::unique_ptr when usingExternalEncoder() is true, or nullptr.
-	std::unique_ptr<TMC_ExternalEncoderUpdateThread> extEncUpdater = nullptr;
+	std::unique_ptr<ExternalEncoderAdapter> extEncAdapter = nullptr;
 
 	// Utility: Timer used for pacing the calibration loops when no external encoder is used.
 	// Shared with TIM_USER (MidiMain) and reconfigured dynamically during calibration.
