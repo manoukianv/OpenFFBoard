@@ -152,7 +152,7 @@ void ErrorHandler::sortErrors(){
 //	return info;
 //}
 
-ErrorPrinter::ErrorPrinter() : Thread("errprint",256,19){ // Higher than default task but low.
+ErrorPrinter::ErrorPrinter() : Thread("errprint",512,19){ // Higher than default task but low.
 	this->Start();
 }
 

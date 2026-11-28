@@ -16,10 +16,11 @@ To maintain architectural consistency across targets, the FreeRTOS heap (`ucHeap
 | **Axes & HidFFB** | **~13.0 KB** (Effects Array) | **1.25 KB** (`312`-word `FFBMAIN` thread) | **~5.1 KB** (Biquad Filters) | Array of 40 `FFB_Effect` is ~12 KB. Dynamic Biquad allocation is used for render quality. |
 | **Command Interfaces** | ~1.0 KB | **3.9 KB** (`600`-word `CMD_MAIN` + `384`-word `CDCCMD`) | **~5.8 KB** (via `help`) | **[FIXED]** `help` command consumes ~5.8 KB peak. Stack rebalancing on `CDCCMD` and `CMD_MAIN` keeps command handling safe. |
 | **BiSS-C Encoder** | < 1.0 KB | **0.5 KB** (`128`-word `BISSENC` thread) | - | **[CRITICAL FIX]** Original 64-word stack had only 60 bytes of headroom; increased to 128 words. |
+| **Error Printer** | < 0.2 KB | **2.0 KB** (`512`-word `errprint` thread) | - | **[CRITICAL FIX]** Original 256-word (1 KB) stack overflowed in Debug (`-O0`) on USB connect (`1,152 B` peak via `broadcastCommandReplyAsync` → `CDC_CommandInterface::sendReplies`), corrupting adjacent `ucHeap` (`AxesManager::axes[0]`). Increased to 512 words. |
 
-**Total Estimated Permanent Heap Usage (Base + Stacks):** ~35.0 KB *(net −7.1 KB vs. legacy LUT design: −12.1 KB saved on permanent cogging tables, +5.0 KB for larger TMC stacks)*.
+**Total Estimated Permanent Heap Usage (Base + Stacks):** ~36.0 KB *(includes +1.0 KB for `errprint` stack fix)*.
 **Total Available Heap:** **78.0 KB** (`configTOTAL_HEAP_SIZE`, `heap_4.c`).
-**Idle Heap Free:** **~43.0 KB**.
+**Idle Heap Free:** **~42.0 KB**.
 
 ### Peak Stress Scenarios
 1. **Help Command:** Consumes ~5.8 KB. Remaining heap: **~37.2 KB**. *(Status: **STABLE**)*
@@ -36,6 +37,26 @@ Current verified stack allocations in `Firmware/FFBoard/`:
 4. **CDCCMD:** **384 words (1.5 KB)** (`CommandInterface.cpp`, reduced from 512 words).
 5. **CMD_MAIN:** **600 words (2.4 KB)** (`FFBoardMainCommandThread.cpp`, reduced from 700 words).
 6. **FFBMAIN:** **312 words (1.25 KB)** (`FFBHIDMain.cpp`).
+7. **ErrorPrinter (`errprint`):** **512 words (2.0 KB)** (`ErrorHandler.cpp`, increased from 256 words after a Debug `-O0` stack overflow of `1,152 B`).
+8. **USB:** **330 words (1.32 KB)** (`USBdevice.cpp`).
+
+### Debug Build (`-O0`) Stack Watermarks & Watchlist (F407VG)
+
+Measured via STM32CubeIDE FreeRTOS Task List on F407VG Debug (`-O0`, USB connected, idle FFB, no active effects):
+
+| Thread | Measured Peak / Stack Size | Usage | Free Margin | Notes / Future Increase if Debug Overflow Occurs |
+| :--- | :---: | :---: | :---: | :--- |
+| **`CMD_MAIN`** | **2,172 B / 2,400 B** (600 words) | **90.5 %** | **228 B** | Tight in `-O0`; heavy commands (`tmc`, `fx`, `help`) may overflow. If needed, bump `FFBoardMainCommandThread.cpp` to **768 words (3,072 B)** *(+672 B)*. |
+| **`USB`** | **1,008 B / 1,320 B** (330 words) | **76.4 %** | **312 B** | Tight during USB enumeration (`snprintf` in `getUsbSerial`) + HID FFB callbacks. If needed, bump `USBdevice.cpp` to **448 words (1,792 B)** *(+472 B)*. |
+| **`defaultTask`** | 1,576 B / 2,048 B (512 words) | 77.0 % | 472 B | Peak reached during boot (`cppmain()`). Monitor if startup sequence grows. |
+| **`FFBMAIN`** | 748 B / 1,248 B (312 words) | 59.9 % | 500 B | Idle measurement (no active FFB effects). In `-O0`, active `EffectsCalculator` frames add ~360 B (~88–95 %). If needed, bump `FFBHIDMain.cpp` to **448 words (1,792 B)** *(+544 B)*. |
+| **`errprint`** | 1,152 B / 2,048 B (512 words) | 56.3 % | 896 B | Fixed from 256 words (1,024 B). Safe margin in `-O0`. |
+| **`CDCCMD`** | 896 B / 1,536 B (384 words) | 58.3 % | 640 B | Safe. |
+| **`TMCENC`** | 156 B / 320 B (80 words) | 48.8 % | 164 B | Safe. |
+| **`HIDCMD`** | 244 B / 512 B (128 words) | 47.7 % | 268 B | Safe. |
+| **`BISSENC`** | 204 B / 512 B (128 words) | 39.8 % | 308 B | Safe. |
+| **`UARTCMD`** | 156 B / 600 B (150 words) | 26.0 % | 444 B | Safe. |
+| **`TMC`** | 848 B / 4,096 B (1,024 words) | 20.7 % | 3,248 B | Safe (headroom reserved for cogging calibration). |
 
 ## Linker & SRAM Constraints (Verified via `arm-none-eabi-size`)
 
